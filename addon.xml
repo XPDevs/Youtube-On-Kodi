@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addon id="plugin.video.myyoutubers" name="My YouTubers" version="1.2.1" provider-name="local">
+    <requires>
+        <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.pluginsource" library="default.py">
+        <provides>video</provides>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+        <summary lang="en">Browse and stream YouTube channels. No login, no API.</summary>
+        <description lang="en">Channels are configured in channels.conf (Kan Gaming, ScrapMan, Midwest Safety, Off the Hook, Daz Games included). Browse every video of a channel, search within a channel, or search all of YouTube. Videos stream in up to 720p via the bundled yt-dlp, or download with live progress to the addon's downloads folder. Download list with delete is in the main menu. No YouTube login or API key required.</description>
+        <platform>all</platform>
+        <license>MIT</license>
+        <assets>
+            <icon>resources/icon.png</icon>
+        </assets>
+    </extension>
+</addon>
