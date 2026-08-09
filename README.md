@@ -1,21 +1,10 @@
-<div align="center">
-
 # Youtube On Kodi
 
-**A custom, unofficial YouTube browser for Kodi — no login, no API key.**
+A custom, unofficial YouTube browser for Kodi. No login, no API key.
 
-[![Kodi](https://img.shields.io/badge/Kodi-19%2B%20(Matrix)-blue.svg)](https://kodi.tv)
-[![License: GPL-2.0-or-later](https://img.shields.io/badge/License-GPL--2.0--or--later-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/Python-3-green.svg)](https://python.org)
-[![yt-dlp](https://img.shields.io/badge/yt--dlp-required-red.svg)](https://github.com/yt-dlp/yt-dlp)
+Disclaimer: this addon is not made by, affiliated with, or endorsed by Google or YouTube. It is an unofficial, custom-made addon. "YouTube" and related trademarks belong to their owners. Streaming or downloading videos may be subject to YouTube's Terms of Service and the wishes of the content creators. Use it at your own risk. The project is provided "as is", with no warranty of any kind.
 
-</div>
-
-> **Disclaimer:** This addon is **not made by, affiliated with, or endorsed by Google LLC or YouTube, LLC**. It is an unofficial, custom-made addon. "YouTube" and all related trademarks are the property of their respective owners. Streaming or downloading videos may be subject to YouTube's Terms of Service and the content creator's wishes — use at your own risk. This project is provided "as is", without warranty of any kind.
-
----
-
-## Features
+## What it does
 
 - Browse channels defined in `channels.conf` (add/remove them from the addon menu)
 - Popular section: top videos from your channels, sorted by view count
@@ -28,22 +17,16 @@
 ## Requirements
 
 - Kodi 19+ (Matrix) or newer, with Python 3
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — you must provide your own copy (see below)
-- ffmpeg — optional; only needed for downloads that require merging
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp), you provide your own copy (see below)
+- ffmpeg, optional. Only needed for downloads that require merging
 
 ## Providing your own yt-dlp
 
-The yt-dlp binary is **not bundled** with this repository.
+The yt-dlp binary is not bundled with this repository.
 
-Drop an executable `yt-dlp` into:
+Drop an executable `yt-dlp` into `resources/bin/yt-dlp`, or install yt-dlp somewhere on your system `PATH`. The addon uses the bundled copy first and falls back to one found on `PATH`.
 
-```
-resources/bin/yt-dlp
-```
-
-or install yt-dlp somewhere on your system `PATH`. The addon uses the bundled copy first and falls back to one found on `PATH`.
-
-> **LibreELEC users:** there is no package manager, so download the yt-dlp standalone binary and place it at `resources/bin/yt-dlp`.
+For LibreELEC users: there is no package manager, so download the yt-dlp standalone binary and place it at `resources/bin/yt-dlp`.
 
 ## Installation
 
@@ -70,7 +53,7 @@ Your personal channel list is stored in the addon's profile folder and is manage
 
 ## Troubleshooting
 
-If something fails, check the addon's `error.log` (in the Kodi addon profile folder) and review the on-screen error notification. Most issues are caused by a missing or outdated `yt-dlp`, or a blocked network request.
+If something fails, check the addon's `error.log` (in the Kodi addon profile folder) and look at the on-screen error notification. Most issues come from a missing or outdated `yt-dlp`, or a blocked network request.
 
 ## License
 
