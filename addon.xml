@@ -8,11 +8,17 @@
     </extension>
     <extension point="xbmc.addon.metadata">
         <summary lang="en">Browse and stream YouTube channels. No login, no API.</summary>
-        <description lang="en">Channels are configured in channels.conf (Kan Gaming, ScrapMan, Midwest Safety, Off the Hook, Daz Games included). Browse every video of a channel, search within a channel, or search all of YouTube. Videos stream in up to 720p via the bundled yt-dlp, or download with live progress to the addon's downloads folder. Download list with delete is in the main menu. No YouTube login or API key required.</description>
+        <description lang="en">A custom, unofficial YouTube browser for Kodi. Browse channels defined in channels.conf, search YouTube or within a channel, and stream or download videos in up to 720p using yt-dlp. Downloads are managed from the addon with a built-in list and delete option. No YouTube login or API key required. Not affiliated with or endorsed by Google LLC or YouTube, LLC.</description>
         <platform>all</platform>
-        <license>MIT</license>
+        <license>GPL-2.0-or-later</license>
         <assets>
             <icon>resources/icon.png</icon>
         </assets>
+        <news>
+1.2.1 - Load more now works without a JS runtime (yt-dlp binary must be provided)
+1.2.0 - Added video download with progress and a Downloads manager (play/delete)
+1.1.0 - Add and remove channels from the addon, per-channel search, error logging
+1.0.0 - Initial release: channel browsing, YouTube search, streaming
+        </news>
     </extension>
 </addon>
