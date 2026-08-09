@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - 2026-08-09
+
+### Added
+- Popular section in the main menu: top videos from your channels, sorted by view count.
+- "Load more" button in YouTube search results (works without a JS runtime).
+
 ## [1.2.1] - 2026-08-09
 
 ### Fixed
@@ -28,6 +34,7 @@ All notable changes to this project are documented here. The format is based on 
 - YouTube search.
 - Video streaming via yt-dlp.
 
+[1.3.0]: https://github.com/USER/REPO/compare/v1.2.1...v1.3.0
 [1.2.1]: https://github.com/USER/REPO/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/USER/REPO/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/USER/REPO/compare/v1.0.0...v1.1.0

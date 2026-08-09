@@ -104,6 +104,8 @@ def list_channels():
         add_dir(li, build_url({"mode": "remove"}))
     li = xbmcgui.ListItem(label="[B]Search YouTube[/B]")
     add_dir(li, build_url({"mode": "ytsearch"}))
+    li = xbmcgui.ListItem(label="[B]Popular[/B]")
+    add_dir(li, build_url({"mode": "popular"}))
     li = xbmcgui.ListItem(label="[B]Downloads[/B]")
     add_dir(li, build_url({"mode": "downloads"}))
     xbmcplugin.endOfDirectory(HANDLE)
@@ -216,18 +218,54 @@ def do_channel_search(query):
     xbmcplugin.endOfDirectory(HANDLE)
 
 
-def do_youtube_search():
-    kb = xbmc.Keyboard("", "Search YouTube")
-    kb.doModal()
-    if not kb.isConfirmed():
-        xbmc.executebuiltin("Container.Refresh")
-        return
-    text = kb.getText().strip()
-    if not text:
-        xbmc.executebuiltin("Container.Refresh")
-        return
+def do_youtube_search(query, offset):
+    if not query:
+        kb = xbmc.Keyboard("", "Search YouTube")
+        kb.doModal()
+        if not kb.isConfirmed():
+            xbmc.executebuiltin("Container.Refresh")
+            return
+        query = kb.getText().strip()
+        if not query:
+            xbmc.executebuiltin("Container.Refresh")
+            return
+    end = offset + PAGE_SIZE
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        videos = kanyt.search_cached(query, CACHE_DIR, end=end)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
     xbmcplugin.setContent(HANDLE, "videos")
-    videos = kanyt.search_youtube(text)
+    shown = videos[offset:end]
+    if not shown:
+        xbmcgui.Dialog().notification(
+            "My YouTubers", "No results", xbmcgui.NOTIFICATION_WARNING
+        )
+    for v in shown:
+        add_dir(
+            video_item(v),
+            build_url({"mode": "video", "id": v["id"]}),
+            isfolder=False,
+        )
+    if len(videos) >= end:
+        li = xbmcgui.ListItem(label="[B]Load more...[/B]")
+        add_dir(li, build_url({"mode": "ytsearch", "q": query, "offset": str(end)}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def do_popular():
+    channels = kanyt.read_channels_conf(CONF_FILE)
+    resolved = []
+    for c in channels:
+        ch = get_channel(c["query"])
+        if ch:
+            resolved.append((ch["id"], ch["name"] or c["query"]))
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        videos = kanyt.popular_videos(resolved, limit=30)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    xbmcplugin.setContent(HANDLE, "videos")
     if not videos:
         xbmcgui.Dialog().notification(
             "My YouTubers", "No results", xbmcgui.NOTIFICATION_WARNING
@@ -378,7 +416,9 @@ def router(paramstring):
     elif mode == "chansearch":
         do_channel_search(params.get("q", ""))
     elif mode == "ytsearch":
-        do_youtube_search()
+        do_youtube_search(params.get("q", ""), int(params.get("offset", "0")))
+    elif mode == "popular":
+        do_popular()
     elif mode == "video":
         video_menu(params.get("id", ""))
     elif mode == "play":

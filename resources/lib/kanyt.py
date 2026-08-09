@@ -1,4 +1,5 @@
 import html as _html
+import hashlib
 import json
 import os
 import re
@@ -174,6 +175,19 @@ def _scrape_videos(url, limit=30):
         cm = re.search(r'"browseId":"(UC[\w-]{22})"', seg)
         if cm:
             channel_id = cm.group(1)
+        view_count = None
+        vm = re.search(
+            r'"(?:shortViewCountText|viewCountText)":\{"simpleText":"((?:[^"\\]|\\.)*)"',
+            seg,
+        )
+        if vm:
+            try:
+                txt = json.loads('"' + vm.group(1) + '"')
+            except Exception:
+                txt = vm.group(1)
+            mc = re.search(r"([\d,.]+) views?", txt)
+            if mc:
+                view_count = int(mc.group(1).replace(",", ""))
         videos.append(
             {
                 "id": vid,
@@ -182,6 +196,7 @@ def _scrape_videos(url, limit=30):
                 "thumb": THUMB.format(vid),
                 "channel": None,
                 "channel_id": channel_id,
+                "view_count": view_count,
             }
         )
         idx = i + 11
@@ -335,26 +350,89 @@ def get_latest_videos(channel_id, limit=15):
 
 
 def search_youtube(query, count=20):
-    if _js_runtimes():
+    p = _run_ytdlp(
+        [
+            "--flat-playlist",
+            "-J",
+            "--no-warnings",
+            "ytsearch{}:{}".format(count, query),
+        ],
+        timeout=90,
+    )
+    if p.returncode == 0:
+        try:
+            data = json.loads(p.stdout)
+            videos = [_entry_to_video(e) for e in data.get("entries", [])]
+            videos = [v for v in videos if v]
+            if videos:
+                return videos
+        except ValueError:
+            pass
+    return _scrape_videos(RESULTS_URL.format(urllib.parse.quote(query)), limit=count)
+
+
+def search_cached(query, cache_dir, end, timeout=90):
+    cache_file = os.path.join(
+        cache_dir, "search_" + hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest() + ".json"
+    )
+    videos, cached_end = [], 0
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                data = json.load(f)
+            videos = data.get("videos", [])
+            cached_end = data.get("end", len(videos))
+        except (OSError, ValueError):
+            videos, cached_end = [], 0
+    if cached_end < end:
         p = _run_ytdlp(
             [
                 "--flat-playlist",
                 "-J",
                 "--no-warnings",
-                "ytsearch{}:{}".format(count, query),
+                "ytsearch{}:{}".format(end, query),
             ],
-            timeout=90,
+            timeout=timeout,
         )
         if p.returncode == 0:
             try:
                 data = json.loads(p.stdout)
                 videos = [_entry_to_video(e) for e in data.get("entries", [])]
                 videos = [v for v in videos if v]
-                if videos:
-                    return videos
+                cached_end = end
             except ValueError:
                 pass
-    return _scrape_videos(RESULTS_URL.format(urllib.parse.quote(query)), limit=count)
+        if not videos:
+            try:
+                videos = _scrape_videos(
+                    RESULTS_URL.format(urllib.parse.quote(query)), limit=end
+                )
+                cached_end = len(videos)
+            except Exception:
+                videos, cached_end = [], 0
+        if videos:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump({"end": cached_end, "videos": videos}, f)
+    return videos[:end]
+
+
+def popular_videos(channels, limit=30):
+    out = {}
+    for cid, name in channels:
+        if not name:
+            continue
+        try:
+            vids = _scrape_videos(
+                RESULTS_URL.format(urllib.parse.quote(name)), limit=30
+            )
+        except Exception:
+            continue
+        for v in vids:
+            if v.get("channel_id") == cid and v.get("view_count") is not None:
+                out.setdefault(v["id"], v)
+    popular = sorted(out.values(), key=lambda v: v.get("view_count") or 0, reverse=True)
+    return popular[:limit]
 
 
 def search_channel(channel_id, query, count=30):

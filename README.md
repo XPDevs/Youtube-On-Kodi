@@ -18,7 +18,8 @@
 ## Features
 
 - Browse channels defined in `channels.conf` (add/remove them from the addon menu)
-- Search YouTube, or search within a specific channel
+- Popular section: top videos from your channels, sorted by view count
+- Search YouTube, or search within a specific channel (with "Load more")
 - Stream videos in up to 720p directly in Kodi
 - Download videos to the addon's downloads folder with a live progress bar
 - Downloads manager: list saved files, play or delete them
