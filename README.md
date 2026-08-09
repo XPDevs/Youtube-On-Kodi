@@ -6,13 +6,17 @@ Disclaimer: this addon is not made by, affiliated with, or endorsed by Google or
 
 ## What it does
 
-- Browse channels defined in `channels.conf` (add/remove them from the addon menu)
+- Browse channels defined in `channels.conf`, with "Load more" paging through a channel's videos
+- Add or remove channels from the addon menu (handle, URL or channel ID)
+- Search YouTube, or search within a specific channel, both with "Load more"
 - Popular section: top videos from your channels, sorted by view count
-- Search YouTube, or search within a specific channel (with "Load more")
+- Selecting a video offers Play or Download
 - Stream videos in up to 720p directly in Kodi
-- Download videos to the addon's downloads folder with a live progress bar
-- Downloads manager: list saved files, play or delete them
+- Download videos to the addon's downloads folder, with a live progress bar and cancel
+- Downloads manager in the main menu: list saved files, play or delete them
+- Error notifications on screen, with details written to `error.log`
 - Works on LibreELEC / Raspberry Pi without a JavaScript runtime
+- No YouTube login or API key required
 
 ## Requirements
 
