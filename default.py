@@ -33,6 +33,8 @@ PLAYLISTS_FILE = os.path.join(PROFILE, "playlists.json")
 HISTORY_FILE = os.path.join(PROFILE, "history.json")
 DEFAULT_CONF = os.path.join(ADDON_PATH, "resources", "channels.conf")
 
+REFRESH_INTERVAL = 86400  # 24 hours in seconds
+
 os.makedirs(PROFILE, exist_ok=True)
 if not os.path.exists(CONF_FILE):
     shutil.copyfile(DEFAULT_CONF, CONF_FILE)
@@ -51,7 +53,15 @@ def add_dir(listitem, url, isfolder=True):
 
 
 def video_item(v):
-    li = xbmcgui.ListItem(label=v["title"])
+    # Check history for resume indicator
+    hist = load_history()
+    entry = hist.get(v["id"])
+    label = v["title"]
+    if entry:
+        pos = entry.get("position", 0)
+        if pos > 30:  # only show if meaningful progress
+            label += " [resume {}]".format(fmt_time(pos))
+    li = xbmcgui.ListItem(label=label)
     li.setInfo(
         "video",
         {
@@ -142,6 +152,40 @@ def get_channel(query):
     return ch
 
 
+# --- Refresh functions ---
+
+def refresh_all_caches():
+    if not xbmcgui.Dialog().yesno("Refresh", "Refresh all channel and search caches?"):
+        return
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        for f in os.listdir(CACHE_DIR):
+            if f.endswith(".json"):
+                os.remove(os.path.join(CACHE_DIR, f))
+        xbmcgui.Dialog().notification("Youtube On Kodi", "All caches cleared.")
+    except Exception as e:
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Error: " + str(e), xbmcgui.NOTIFICATION_ERROR)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    xbmc.executebuiltin("Container.Refresh")
+
+
+def refresh_channel_cache(query):
+    ch = get_channel(query)
+    if not ch:
+        return
+    cache_file = os.path.join(CACHE_DIR, ch["id"] + ".json")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+    plist_cache = os.path.join(CACHE_DIR, "plists_" + ch["id"] + ".json")
+    if os.path.exists(plist_cache):
+        os.remove(plist_cache)
+    xbmcgui.Dialog().notification("Youtube On Kodi", "Cache refreshed for " + (ch.get("name") or query))
+    xbmc.executebuiltin("Container.Refresh")
+
+
+# --- Main menu ---
+
 def list_channels():
     channels = kanyt.read_channels_conf(CONF_FILE)
     for c in channels:
@@ -167,6 +211,8 @@ def list_channels():
     add_dir(li, build_url({"mode": "downloads"}))
     li = xbmcgui.ListItem(label="[B]History[/B]")
     add_dir(li, build_url({"mode": "history"}))
+    li = xbmcgui.ListItem(label="[B]Refresh all caches[/B]")
+    add_dir(li, build_url({"mode": "refresh_all"}))
     xbmcplugin.endOfDirectory(HANDLE)
 
 
@@ -241,6 +287,11 @@ def list_videos(query, offset):
     add_dir(
         li,
         build_url({"mode": "chplists", "q": query}),
+    )
+    li = xbmcgui.ListItem(label="[B]Refresh channel cache[/B]")
+    add_dir(
+        li,
+        build_url({"mode": "refresh_channel", "q": query}),
     )
     for v in videos[offset:end]:
         add_dir(
@@ -355,6 +406,8 @@ def do_popular():
     xbmcplugin.endOfDirectory(HANDLE)
 
 
+# --- Playback and history tracking ---
+
 def play_video(video_id, title="", auto_resume=False):
     hist = load_history()
     entry = hist.get(video_id)
@@ -415,10 +468,22 @@ def _track_playback(video_id, title, start_pos):
         if position and duration and now - last_save >= 5:
             last_save = now
             hist = load_history()
+            # Get additional metadata from player if available
+            try:
+                info_tag = player.getVideoInfoTag()
+                channel = info_tag.getStudio() or ""
+                thumb = info_tag.getArt("thumb") or kanyt.THUMB.format(video_id)
+            except:
+                channel = ""
+                thumb = kanyt.THUMB.format(video_id)
+            percentage = int((position / duration) * 100) if duration else 0
             hist[video_id] = {
                 "title": title or video_id,
                 "position": int(position),
                 "duration": int(duration),
+                "percentage": percentage,
+                "channel": channel,
+                "thumb": thumb,
                 "date": time.strftime("%Y-%m-%d %H:%M"),
             }
             try:
@@ -426,6 +491,7 @@ def _track_playback(video_id, title, start_pos):
             except Exception:
                 pass
         time.sleep(5)
+    # Final save when stopped
     try:
         duration = player.getTotalTime()
         position = player.getTime()
@@ -433,10 +499,21 @@ def _track_playback(video_id, title, start_pos):
         duration, position = 0, 0
     if position and duration:
         hist = load_history()
+        try:
+            info_tag = player.getVideoInfoTag()
+            channel = info_tag.getStudio() or ""
+            thumb = info_tag.getArt("thumb") or kanyt.THUMB.format(video_id)
+        except:
+            channel = ""
+            thumb = kanyt.THUMB.format(video_id)
+        percentage = int((position / duration) * 100) if duration else 0
         hist[video_id] = {
             "title": title or video_id,
             "position": int(position),
             "duration": int(duration),
+            "percentage": percentage,
+            "channel": channel,
+            "thumb": thumb,
             "date": time.strftime("%Y-%m-%d %H:%M"),
         }
         try:
@@ -896,26 +973,55 @@ def save_playlist_by_url(url):
     xbmcgui.Dialog().notification("Youtube On Kodi", "Saved to My Playlists")
 
 
+# --- History list (enhanced) ---
+
 def list_history():
     hist = load_history()
-    items = sorted(hist.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)
-    li = xbmcgui.ListItem(label="[B]Clear history[/B]")
-    add_dir(li, build_url({"mode": "hist_clear"}))
-    if not items:
+    if not hist:
         li = xbmcgui.ListItem(label="No history yet")
         add_dir(li, build_url({"mode": "main"}))
         xbmcplugin.endOfDirectory(HANDLE)
         return
+    items = sorted(hist.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)
+    li = xbmcgui.ListItem(label="[B]Clear history[/B]")
+    add_dir(li, build_url({"mode": "hist_clear"}))
     for vid, h in items:
         pos = fmt_time(h.get("position", 0))
         dur = fmt_time(h.get("duration", 0))
-        label = "{} ({}/{})".format(h.get("title", vid), pos, dur)
+        pct = h.get("percentage", 0)
+        title = h.get("title", vid)
+        channel = h.get("channel", "")
+        thumb = h.get("thumb", kanyt.THUMB.format(vid))
+        label = "{} - {}% ({}/{})".format(title, pct, pos, dur)
+        if channel:
+            label = "[{}] ".format(channel) + label
+        li = xbmcgui.ListItem(label=label)
+        li.setInfo("video", {"title": title, "plot": title, "studio": channel})
+        li.setArt({"thumb": thumb, "icon": thumb})
+        li.setProperty("IsPlayable", "true")  # so it can be played directly
+        # Add a progress bar using Kodi's property
+        li.setProperty("Progress", str(pct))
+        # Instead of playing directly, we route to a menu
         add_dir(
-            dir_item(label),
-            build_url({"mode": "play", "id": vid, "title": h.get("title", ""), "resume": "1"}),
+            li,
+            build_url({"mode": "hist_item", "id": vid, "title": title}),
             isfolder=False,
         )
     xbmcplugin.endOfDirectory(HANDLE)
+
+
+def history_item_menu(video_id, title):
+    options = ["Play (auto-resume)", "Remove from history", "Cancel"]
+    choice = xbmcgui.Dialog().select("History item", options)
+    if choice == 0:
+        play_video(video_id, title, auto_resume=True)
+    elif choice == 1:
+        hist = load_history()
+        if video_id in hist:
+            del hist[video_id]
+            save_history(hist)
+            xbmcgui.Dialog().notification("Youtube On Kodi", "Removed from history")
+            xbmc.executebuiltin("Container.Refresh")
 
 
 def clear_history():
@@ -923,6 +1029,8 @@ def clear_history():
         save_history({})
         xbmc.executebuiltin("Container.Refresh")
 
+
+# --- Router ---
 
 def router(paramstring):
     params = dict(urllib.parse.parse_qsl(paramstring[1:]))
@@ -994,6 +1102,12 @@ def router(paramstring):
         list_history()
     elif mode == "hist_clear":
         clear_history()
+    elif mode == "hist_item":
+        history_item_menu(params.get("id", ""), params.get("title", ""))
+    elif mode == "refresh_all":
+        refresh_all_caches()
+    elif mode == "refresh_channel":
+        refresh_channel_cache(params.get("q", ""))
     else:
         list_channels()
 

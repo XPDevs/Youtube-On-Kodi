@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="plugin.video.myyoutubers" name="Youtube On Kodi" version="1.4.0" provider-name="local">
+<addon id="plugin.video.myyoutubers" name="Youtube On Kodi" version="1.6.0" provider-name="local">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>
@@ -15,6 +15,8 @@
             <icon>resources/icon.png</icon>
         </assets>
         <news>
+1.6.0 - Enhanced history: resume indicators in video lists, rich history with thumbnails and progress, delete individual history entries, better auto‑resume.
+1.5.3 - Added manual refresh options: refresh all caches or refresh a single channel; automatic cache expiry after 24 hours.
 1.4.0 - Playlists: browse your channels' playlists, playlist results in search, playlists you create in the addon (add or paste video links), and watch history with resume
 1.3.0 - Added a Popular section (top videos from your channels by views) and Load more for YouTube search
 1.2.1 - Load more now works without a JS runtime (yt-dlp binary must be provided)

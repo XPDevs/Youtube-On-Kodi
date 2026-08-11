@@ -10,6 +10,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+import time
 
 FEED_TMPL = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
 WATCH_URL = "https://www.youtube.com/watch?v={}"
@@ -18,10 +19,27 @@ RESULTS_URL = "https://www.youtube.com/results?search_query={}"
 THUMB = "https://i.ytimg.com/vi/{}/hqdefault.jpg"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
+REFRESH_INTERVAL = 86400  # 24 hours in seconds
+
 FFMPEG_DIRS = [
     "/storage/.kodi/addons/tools.ffmpeg-tools/bin",
     os.environ.get("MYYT_FFMPEG_DIR", ""),
 ]
+
+
+def _is_cache_expired(filepath):
+    """Return True if the cache file is older than REFRESH_INTERVAL or doesn't contain a timestamp."""
+    if not os.path.exists(filepath):
+        return True
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+        timestamp = data.get("timestamp", 0)
+        if time.time() - timestamp > REFRESH_INTERVAL:
+            return True
+        return False
+    except (OSError, ValueError):
+        return True
 
 
 def find_ffmpeg_dir():
@@ -312,7 +330,9 @@ def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
     cache_file = os.path.join(cache_dir, channel_id + ".json")
     videos = []
     cached_end = 0
-    if os.path.exists(cache_file):
+
+    # Check if cache exists and is fresh
+    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
         try:
             with open(cache_file) as f:
                 data = json.load(f)
@@ -320,7 +340,9 @@ def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
             cached_end = data.get("end", len(videos))
         except (OSError, ValueError):
             videos, cached_end = [], 0
-    if cached_end < end:
+
+    # If cache missing or expired, fetch new data
+    if cached_end < end or _is_cache_expired(cache_file):
         p = _run_ytdlp(
             [
                 "--flat-playlist",
@@ -349,14 +371,23 @@ def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
         if videos:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "videos": videos}, f)
+                json.dump({"end": cached_end, "videos": videos, "timestamp": time.time()}, f)
+        else:
+            # If fetch fails, we might want to keep old cache? For now, we'll keep existing if any.
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file) as f:
+                        old_data = json.load(f)
+                    videos = old_data.get("videos", [])
+                except:
+                    videos = []
     return videos[:end]
 
 
 def get_channel_playlists(channel_id, cache_dir, timeout=90):
     cache_file = os.path.join(cache_dir, "plists_" + channel_id + ".json")
     playlists = []
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
         try:
             with open(cache_file) as f:
                 playlists = json.load(f)
@@ -364,6 +395,7 @@ def get_channel_playlists(channel_id, cache_dir, timeout=90):
                 return playlists
         except (OSError, ValueError):
             playlists = []
+    # Fetch fresh
     url = "https://www.youtube.com/channel/{}/playlists".format(channel_id)
     p = _run_ytdlp(
         ["--flat-playlist", "-J", "--no-warnings", url],
@@ -387,7 +419,17 @@ def get_channel_playlists(channel_id, cache_dir, timeout=90):
     if playlists:
         os.makedirs(cache_dir, exist_ok=True)
         with open(cache_file, "w") as f:
-            json.dump(playlists, f)
+            json.dump(playlists, f, indent=2)  # also could add timestamp, but not needed for playlists? We'll add.
+            # Actually we should add timestamp to the file structure.
+            # For simplicity, we'll save as dict with 'playlists' and 'timestamp'.
+            # But to avoid breaking existing code, we'll wrap.
+        # Better: save as dict
+        with open(cache_file, "w") as f:
+            json.dump({"playlists": playlists, "timestamp": time.time()}, f)
+    else:
+        # If fetch fails and we had old data, return that? We already checked expiry, so we might have no data.
+        # We'll return empty.
+        pass
     return playlists
 
 
@@ -397,7 +439,7 @@ def get_playlist_videos(playlist_url, cache_dir, end=30, timeout=90):
         "plist_" + hashlib.sha1(playlist_url.encode("utf-8", "ignore")).hexdigest() + ".json",
     )
     videos, cached_end = [], 0
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
         try:
             with open(cache_file) as f:
                 data = json.load(f)
@@ -428,7 +470,7 @@ def get_playlist_videos(playlist_url, cache_dir, end=30, timeout=90):
         if videos:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "videos": videos}, f)
+                json.dump({"end": cached_end, "videos": videos, "timestamp": time.time()}, f)
     return videos[:end]
 
 
@@ -484,7 +526,7 @@ def search_cached(query, cache_dir, end, timeout=90):
         cache_dir, "search_" + hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest() + ".json"
     )
     entries, cached_end = [], 0
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
         try:
             with open(cache_file) as f:
                 data = json.load(f)
@@ -539,7 +581,7 @@ def search_cached(query, cache_dir, end, timeout=90):
         if entries:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "entries": entries}, f)
+                json.dump({"end": cached_end, "entries": entries, "timestamp": time.time()}, f)
     return entries[:end]
 
 
@@ -549,7 +591,7 @@ def search_playlists_cached(query, cache_dir, end, timeout=90):
         "psrch_" + hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest() + ".json",
     )
     playlists, cached_end = [], 0
-    if os.path.exists(cache_file):
+    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
         try:
             with open(cache_file) as f:
                 data = json.load(f)
@@ -588,7 +630,7 @@ def search_playlists_cached(query, cache_dir, end, timeout=90):
         if playlists:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "playlists": playlists}, f)
+                json.dump({"end": cached_end, "playlists": playlists, "timestamp": time.time()}, f)
     return playlists[:end]
 
 
