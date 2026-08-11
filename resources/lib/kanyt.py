@@ -116,6 +116,8 @@ def _get_page(url, timeout=25):
 def _channel_url(query):
     if re.match(r"^https?://", query, re.IGNORECASE):
         return query
+    if re.fullmatch(r"UC[\w-]{22}", query):
+        return "https://www.youtube.com/channel/" + query
     if query.startswith("@"):
         return "https://www.youtube.com/" + query
     handle = "@" + re.sub(r"[^A-Za-z0-9_.-]", "", query.replace(" ", ""))
@@ -203,10 +205,37 @@ def _scrape_videos(url, limit=30):
     return videos
 
 
+def _entry_to_result(e):
+    if not e or not e.get("id"):
+        return None
+    if e.get("ie_key") == "YoutubeTab":
+        pid = e["id"]
+        if pid.startswith("UC"):
+            return {
+                "type": "channel",
+                "id": pid,
+                "title": (e.get("title") or "").strip(),
+                "url": "https://www.youtube.com/channel/" + pid,
+                "thumb": e.get("thumbnail") or "",
+            }
+        return {
+            "type": "playlist",
+            "id": pid,
+            "title": (e.get("title") or "").strip(),
+            "url": "https://www.youtube.com/playlist?list=" + pid,
+            "thumb": e.get("thumbnail") or "",
+        }
+    v = _entry_to_video(e)
+    if v:
+        v["type"] = "video"
+    return v
+
+
 def _entry_to_video(e):
     if not e or not e.get("id"):
         return None
     return {
+        "type": "video",
         "id": e["id"],
         "title": (e.get("title") or "").strip(),
         "url": WATCH_URL.format(e["id"]),
@@ -324,6 +353,85 @@ def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
     return videos[:end]
 
 
+def get_channel_playlists(channel_id, cache_dir, timeout=90):
+    cache_file = os.path.join(cache_dir, "plists_" + channel_id + ".json")
+    playlists = []
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                playlists = json.load(f)
+            if playlists:
+                return playlists
+        except (OSError, ValueError):
+            playlists = []
+    url = "https://www.youtube.com/channel/{}/playlists".format(channel_id)
+    p = _run_ytdlp(
+        ["--flat-playlist", "-J", "--no-warnings", url],
+        timeout=timeout,
+    )
+    if p.returncode == 0:
+        try:
+            data = json.loads(p.stdout)
+            for e in data.get("entries", []):
+                if not e or not e.get("id"):
+                    continue
+                playlists.append(
+                    {
+                        "id": e["id"],
+                        "title": (e.get("title") or "").strip(),
+                        "url": "https://www.youtube.com/playlist?list=" + e["id"],
+                    }
+                )
+        except ValueError:
+            playlists = []
+    if playlists:
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(cache_file, "w") as f:
+            json.dump(playlists, f)
+    return playlists
+
+
+def get_playlist_videos(playlist_url, cache_dir, end=30, timeout=90):
+    cache_file = os.path.join(
+        cache_dir,
+        "plist_" + hashlib.sha1(playlist_url.encode("utf-8", "ignore")).hexdigest() + ".json",
+    )
+    videos, cached_end = [], 0
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                data = json.load(f)
+            videos = data.get("videos", [])
+            cached_end = data.get("end", len(videos))
+        except (OSError, ValueError):
+            videos, cached_end = [], 0
+    if cached_end < end:
+        p = _run_ytdlp(
+            [
+                "--flat-playlist",
+                "-J",
+                "--no-warnings",
+                "--playlist-items",
+                "1-{}".format(end),
+                playlist_url,
+            ],
+            timeout=timeout,
+        )
+        if p.returncode == 0:
+            try:
+                data = json.loads(p.stdout)
+                videos = [_entry_to_video(e) for e in data.get("entries", [])]
+                videos = [v for v in videos if v]
+                cached_end = end
+            except ValueError:
+                pass
+        if videos:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump({"end": cached_end, "videos": videos}, f)
+    return videos[:end]
+
+
 def get_latest_videos(channel_id, limit=15):
     url = FEED_TMPL.format(channel_id)
     with urllib.request.urlopen(url, timeout=20) as resp:
@@ -375,46 +483,113 @@ def search_cached(query, cache_dir, end, timeout=90):
     cache_file = os.path.join(
         cache_dir, "search_" + hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest() + ".json"
     )
-    videos, cached_end = [], 0
+    entries, cached_end = [], 0
     if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
                 data = json.load(f)
-            videos = data.get("videos", [])
-            cached_end = data.get("end", len(videos))
+            entries = data.get("entries") or data.get("videos", [])
+            cached_end = data.get("end", len(entries))
         except (OSError, ValueError):
-            videos, cached_end = [], 0
+            entries, cached_end = [], 0
     if cached_end < end:
+        url = RESULTS_URL.format(urllib.parse.quote(query))
         p = _run_ytdlp(
             [
                 "--flat-playlist",
                 "-J",
                 "--no-warnings",
-                "ytsearch{}:{}".format(end, query),
+                "--playlist-items",
+                "1-{}".format(end),
+                url,
+            ],
+            timeout=timeout,
+        )
+        entries = []
+        if p.returncode == 0:
+            try:
+                data = json.loads(p.stdout)
+                entries = [_entry_to_result(e) for e in data.get("entries", [])]
+                entries = [e for e in entries if e]
+            except ValueError:
+                entries = []
+        if not entries:
+            try:
+                p2 = _run_ytdlp(
+                    [
+                        "--flat-playlist",
+                        "-J",
+                        "--no-warnings",
+                        "ytsearch{}:{}".format(end, query),
+                    ],
+                    timeout=timeout,
+                )
+                if p2.returncode == 0:
+                    data2 = json.loads(p2.stdout)
+                    entries = [_entry_to_video(e) for e in data2.get("entries", [])]
+                    entries = [e for e in entries if e]
+            except Exception:
+                entries = []
+        if not entries:
+            try:
+                entries = _scrape_videos(url, limit=end)
+            except Exception:
+                entries = []
+        cached_end = len(entries)
+        if entries:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(cache_file, "w") as f:
+                json.dump({"end": cached_end, "entries": entries}, f)
+    return entries[:end]
+
+
+def search_playlists_cached(query, cache_dir, end, timeout=90):
+    cache_file = os.path.join(
+        cache_dir,
+        "psrch_" + hashlib.sha1(query.encode("utf-8", "ignore")).hexdigest() + ".json",
+    )
+    playlists, cached_end = [], 0
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                data = json.load(f)
+            playlists = data.get("playlists", [])
+            cached_end = data.get("end", len(playlists))
+        except (OSError, ValueError):
+            playlists, cached_end = [], 0
+    if cached_end < end:
+        url = RESULTS_URL.format(urllib.parse.quote(query))
+        p = _run_ytdlp(
+            [
+                "--flat-playlist",
+                "-J",
+                "--no-warnings",
+                "--playlist-items",
+                "1-{}".format(end),
+                url,
             ],
             timeout=timeout,
         )
         if p.returncode == 0:
             try:
                 data = json.loads(p.stdout)
-                videos = [_entry_to_video(e) for e in data.get("entries", [])]
-                videos = [v for v in videos if v]
-                cached_end = end
+                playlists = [
+                    e
+                    for e in data.get("entries", [])
+                    if e
+                    and e.get("ie_key") == "YoutubeTab"
+                    and e.get("id", "").startswith(("PL", "PLAY"))
+                ]
+                playlists = [_entry_to_result(e) for e in playlists]
+                playlists = [p for p in playlists if p]
             except ValueError:
-                pass
-        if not videos:
-            try:
-                videos = _scrape_videos(
-                    RESULTS_URL.format(urllib.parse.quote(query)), limit=end
-                )
-                cached_end = len(videos)
-            except Exception:
-                videos, cached_end = [], 0
-        if videos:
+                playlists = []
+        cached_end = len(playlists)
+        if playlists:
             os.makedirs(cache_dir, exist_ok=True)
             with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "videos": videos}, f)
-    return videos[:end]
+                json.dump({"end": cached_end, "playlists": playlists}, f)
+    return playlists[:end]
 
 
 def popular_videos(channels, limit=30):
@@ -439,8 +614,26 @@ def search_channel(channel_id, query, count=30):
     return [
         v
         for v in search_youtube(query, count)
-        if v.get("channel_id") == channel_id
+        if v.get("type") != "playlist" and v.get("channel_id") == channel_id
     ]
+
+
+def get_video_info(video_id):
+    url = WATCH_URL.format(video_id)
+    p = _run_ytdlp(["-J", "--no-warnings", url], timeout=60)
+    if p.returncode == 0:
+        try:
+            d = json.loads(p.stdout)
+        except ValueError:
+            return None
+        vid = d.get("id") or video_id
+        return {
+            "id": vid,
+            "title": (d.get("title") or video_id).strip(),
+            "thumb": THUMB.format(vid),
+            "channel": d.get("channel"),
+        }
+    return None
 
 
 def get_stream_url(video_id, max_height=720):
