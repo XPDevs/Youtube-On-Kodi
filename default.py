@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import urllib.parse
 
@@ -28,6 +29,8 @@ CACHE_DIR = os.path.join(PROFILE, "cache")
 CONF_FILE = os.path.join(PROFILE, "channels.conf")
 ERROR_LOG = os.path.join(PROFILE, "error.log")
 DOWNLOAD_DIR = os.path.join(PROFILE, "downloads")
+PLAYLISTS_FILE = os.path.join(PROFILE, "playlists.json")
+HISTORY_FILE = os.path.join(PROFILE, "history.json")
 DEFAULT_CONF = os.path.join(ADDON_PATH, "resources", "channels.conf")
 
 os.makedirs(PROFILE, exist_ok=True)
@@ -54,12 +57,64 @@ def video_item(v):
         {
             "title": v["title"],
             "plot": v["title"],
-            "studio": v.get("channel", "My YouTubers"),
+            "studio": v.get("channel", "Youtube On Kodi"),
         },
     )
     li.setArt({"thumb": v["thumb"], "icon": v["thumb"]})
     li.setProperty("IsPlayable", "true")
     return li
+
+
+def dir_item(title, thumb=""):
+    li = xbmcgui.ListItem(label=title)
+    li.setInfo("video", {"title": title, "plot": title})
+    li.setArt({"thumb": thumb, "icon": thumb})
+    return li
+
+
+def load_playlists():
+    if not os.path.exists(PLAYLISTS_FILE):
+        return []
+    try:
+        with open(PLAYLISTS_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except (OSError, ValueError):
+        pass
+    return []
+
+
+def save_playlists(plists):
+    with open(PLAYLISTS_FILE, "w") as f:
+        json.dump(plists, f)
+
+
+def load_history():
+    if not os.path.exists(HISTORY_FILE):
+        return {}
+    try:
+        with open(HISTORY_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def save_history(hist):
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(hist, f)
+
+
+def fmt_time(sec):
+    sec = int(sec or 0)
+    m, s = divmod(sec, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return "{}:{:02d}:{:02d}".format(h, m, s)
+    return "{}:{:02d}".format(m, s)
 
 
 def write_conf(channels):
@@ -106,8 +161,12 @@ def list_channels():
     add_dir(li, build_url({"mode": "ytsearch"}))
     li = xbmcgui.ListItem(label="[B]Popular[/B]")
     add_dir(li, build_url({"mode": "popular"}))
+    li = xbmcgui.ListItem(label="[B]Playlists[/B]")
+    add_dir(li, build_url({"mode": "playlists"}))
     li = xbmcgui.ListItem(label="[B]Downloads[/B]")
     add_dir(li, build_url({"mode": "downloads"}))
+    li = xbmcgui.ListItem(label="[B]History[/B]")
+    add_dir(li, build_url({"mode": "history"}))
     xbmcplugin.endOfDirectory(HANDLE)
 
 
@@ -129,7 +188,7 @@ def add_channel():
         xbmc.executebuiltin("Dialog.Close(busydialog)")
     if not ch:
         xbmcgui.Dialog().notification(
-            "My YouTubers",
+            "Youtube On Kodi",
             "Could not resolve: " + query,
             xbmcgui.NOTIFICATION_ERROR,
         )
@@ -137,13 +196,13 @@ def add_channel():
     channels = kanyt.read_channels_conf(CONF_FILE)
     if any(c["query"] == query for c in channels):
         xbmcgui.Dialog().notification(
-            "My YouTubers", "Already added: " + (name or ch["name"])
+            "Youtube On Kodi", "Already added: " + (name or ch["name"])
         )
         return
     channels.append({"query": query, "name": name or ch["name"]})
     write_conf(channels)
     xbmcgui.Dialog().notification(
-        "My YouTubers", "Added: " + (name or ch["name"])
+        "Youtube On Kodi", "Added: " + (name or ch["name"])
     )
     xbmc.executebuiltin("Container.Refresh")
 
@@ -165,7 +224,7 @@ def list_videos(query, offset):
     ch = get_channel(query)
     if not ch:
         xbmcgui.Dialog().notification(
-            "My YouTubers",
+            "Youtube On Kodi",
             "Could not resolve channel: " + query,
             xbmcgui.NOTIFICATION_ERROR,
         )
@@ -178,10 +237,15 @@ def list_videos(query, offset):
         li,
         build_url({"mode": "chansearch", "q": query}),
     )
+    li = xbmcgui.ListItem(label="[B]Playlists: {}[/B]".format(ch["name"]))
+    add_dir(
+        li,
+        build_url({"mode": "chplists", "q": query}),
+    )
     for v in videos[offset:end]:
         add_dir(
             video_item(v),
-            build_url({"mode": "video", "id": v["id"]}),
+            build_url({"mode": "video", "id": v["id"], "title": v["title"]}),
             isfolder=False,
         )
     if len(videos) >= end:
@@ -207,12 +271,12 @@ def do_channel_search(query):
     videos = kanyt.search_channel(ch["id"], text)
     if not videos:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "No results", xbmcgui.NOTIFICATION_WARNING
+            "Youtube On Kodi", "No results", xbmcgui.NOTIFICATION_WARNING
         )
     for v in videos:
         add_dir(
             video_item(v),
-            build_url({"mode": "video", "id": v["id"]}),
+            build_url({"mode": "video", "id": v["id"], "title": v["title"]}),
             isfolder=False,
         )
     xbmcplugin.endOfDirectory(HANDLE)
@@ -232,22 +296,34 @@ def do_youtube_search(query, offset):
     end = offset + PAGE_SIZE
     xbmc.executebuiltin("ActivateWindow(busydialog)")
     try:
-        videos = kanyt.search_cached(query, CACHE_DIR, end=end)
+        entries = kanyt.search_cached(query, CACHE_DIR, end=end)
     finally:
         xbmc.executebuiltin("Dialog.Close(busydialog)")
     xbmcplugin.setContent(HANDLE, "videos")
-    shown = videos[offset:end]
+    shown = entries[offset:end]
     if not shown:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "No results", xbmcgui.NOTIFICATION_WARNING
+            "Youtube On Kodi", "No results", xbmcgui.NOTIFICATION_WARNING
         )
-    for v in shown:
-        add_dir(
-            video_item(v),
-            build_url({"mode": "video", "id": v["id"]}),
-            isfolder=False,
-        )
-    if len(videos) >= end:
+    for e in shown:
+        etype = e.get("type")
+        if etype == "playlist":
+            add_dir(
+                dir_item(e["title"], e.get("thumb", "")),
+                build_url({"mode": "plist", "url": e["url"]}),
+            )
+        elif etype == "channel":
+            add_dir(
+                dir_item(e["title"], e.get("thumb", "")),
+                build_url({"mode": "videos", "q": e["id"]}),
+            )
+        else:
+            add_dir(
+                video_item(e),
+                build_url({"mode": "video", "id": e["id"], "title": e["title"]}),
+                isfolder=False,
+            )
+    if len(entries) >= end:
         li = xbmcgui.ListItem(label="[B]Load more...[/B]")
         add_dir(li, build_url({"mode": "ytsearch", "q": query, "offset": str(end)}))
     xbmcplugin.endOfDirectory(HANDLE)
@@ -268,18 +344,33 @@ def do_popular():
     xbmcplugin.setContent(HANDLE, "videos")
     if not videos:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "No results", xbmcgui.NOTIFICATION_WARNING
+            "Youtube On Kodi", "No results", xbmcgui.NOTIFICATION_WARNING
         )
     for v in videos:
         add_dir(
             video_item(v),
-            build_url({"mode": "video", "id": v["id"]}),
+            build_url({"mode": "video", "id": v["id"], "title": v["title"]}),
             isfolder=False,
         )
     xbmcplugin.endOfDirectory(HANDLE)
 
 
-def play_video(video_id):
+def play_video(video_id, title="", auto_resume=False):
+    hist = load_history()
+    entry = hist.get(video_id)
+    resume_at = 0
+    if entry:
+        pos = entry.get("position") or 0
+        dur = entry.get("duration") or 0
+        if pos > 30 and dur and pos < dur - 10:
+            if auto_resume:
+                resume_at = pos
+            elif xbmcgui.Dialog().yesno(
+                "Youtube On Kodi",
+                "Resume from {}".format(fmt_time(pos)) + "?",
+                "Select Yes to resume or No to start over.",
+            ):
+                resume_at = pos
     xbmc.executebuiltin("ActivateWindow(busydialog)")
     try:
         stream_url = kanyt.get_stream_url(video_id)
@@ -287,20 +378,130 @@ def play_video(video_id):
         xbmc.executebuiltin("Dialog.Close(busydialog)")
     if not stream_url:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "Could not resolve stream", xbmcgui.NOTIFICATION_ERROR
+            "Youtube On Kodi", "Could not resolve stream", xbmcgui.NOTIFICATION_ERROR
         )
         return
     li = xbmcgui.ListItem(path=stream_url)
     li.setProperty("IsPlayable", "true")
-    xbmc.Player().play(stream_url, li)
+    player = xbmc.Player()
+    player.play(stream_url, li)
+    if resume_at:
+        try:
+            for _ in range(50):
+                if player.isPlaying():
+                    player.seekTime(resume_at)
+                    break
+                time.sleep(0.1)
+        except Exception:
+            pass
+    threading.Thread(
+        target=_track_playback, args=(video_id, title, resume_at), daemon=True
+    ).start()
 
 
-def video_menu(video_id):
-    choice = xbmcgui.Dialog().select("Video", ["Play", "Download", "Cancel"])
+def _track_playback(video_id, title, start_pos):
+    player = xbmc.Player()
+    deadline = time.time() + 6 * 60 * 60
+    last_save = 0
+    while time.time() < deadline:
+        try:
+            if not player.isPlaying():
+                break
+            duration = player.getTotalTime()
+            position = player.getTime()
+        except Exception:
+            duration, position = 0, 0
+        now = time.time()
+        if position and duration and now - last_save >= 5:
+            last_save = now
+            hist = load_history()
+            hist[video_id] = {
+                "title": title or video_id,
+                "position": int(position),
+                "duration": int(duration),
+                "date": time.strftime("%Y-%m-%d %H:%M"),
+            }
+            try:
+                save_history(hist)
+            except Exception:
+                pass
+        time.sleep(5)
+    try:
+        duration = player.getTotalTime()
+        position = player.getTime()
+    except Exception:
+        duration, position = 0, 0
+    if position and duration:
+        hist = load_history()
+        hist[video_id] = {
+            "title": title or video_id,
+            "position": int(position),
+            "duration": int(duration),
+            "date": time.strftime("%Y-%m-%d %H:%M"),
+        }
+        try:
+            save_history(hist)
+        except Exception:
+            pass
+
+
+def video_menu(video_id, title="", plist_idx=None, vpos=None):
+    options = ["Play", "Download", "Add to playlist"]
+    if plist_idx is not None:
+        options.insert(2, "Remove from playlist")
+    options.append("Cancel")
+    choice = xbmcgui.Dialog().select("Video", options)
     if choice == 0:
-        play_video(video_id)
+        play_video(video_id, title)
     elif choice == 1:
         download_video(video_id)
+    elif plist_idx is not None and choice == 2:
+        remove_from_playlist(plist_idx, vpos)
+    elif choice == 2 or (plist_idx is not None and choice == 3):
+        add_to_playlist(video_id, title)
+
+
+def add_to_playlist(video_id, title=""):
+    plists = load_playlists()
+    names = [p["name"] for p in plists]
+    names.append("[B]+ New playlist...[/B]")
+    sel = xbmcgui.Dialog().select("Add to playlist", names)
+    if sel < 0:
+        return
+    if sel == len(plists):
+        kb = xbmc.Keyboard("", "Playlist name")
+        kb.doModal()
+        name = kb.getText().strip() if kb.isConfirmed() else ""
+        if not name:
+            return
+        plists.append({"name": name, "videos": []})
+        sel = len(plists) - 1
+    p = plists[sel]
+    entry = {
+        "id": video_id,
+        "title": title or video_id,
+        "thumb": kanyt.THUMB.format(video_id),
+    }
+    if any(v["id"] == video_id for v in p.get("videos", [])):
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Already in playlist")
+        return
+    p.setdefault("videos", []).append(entry)
+    save_playlists(plists)
+    xbmcgui.Dialog().notification("Youtube On Kodi", "Added to " + p["name"])
+
+
+def remove_from_playlist(plist_idx, vpos):
+    plists = load_playlists()
+    if plist_idx < 0 or plist_idx >= len(plists):
+        return
+    p = plists[plist_idx]
+    if vpos is None or vpos < 0 or vpos >= len(p.get("videos", [])):
+        return
+    if xbmcgui.Dialog().yesno("Remove", "Remove from {}?".format(p["name"])):
+        p["videos"].pop(vpos)
+        save_playlists(plists)
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Removed")
+        xbmc.executebuiltin("Container.Refresh")
 
 
 def download_video(video_id):
@@ -330,7 +531,7 @@ def download_video(video_id):
 
     threading.Thread(target=reader, daemon=True).start()
     dp = xbmcgui.DialogProgress()
-    dp.create("My YouTubers", "Downloading...")
+    dp.create("Youtube On Kodi", "Downloading...")
     pct = 0
     canceled = False
     while proc.poll() is None:
@@ -349,12 +550,12 @@ def download_video(video_id):
     proc.wait()
     dp.close()
     if canceled:
-        xbmcgui.Dialog().notification("My YouTubers", "Download cancelled")
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Download cancelled")
     elif proc.returncode == 0:
-        xbmcgui.Dialog().notification("My YouTubers", "Saved to downloads")
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Saved to downloads")
     else:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "Download failed", xbmcgui.NOTIFICATION_ERROR
+            "Youtube On Kodi", "Download failed", xbmcgui.NOTIFICATION_ERROR
         )
 
 
@@ -387,7 +588,7 @@ def dl_file(name):
     path = os.path.join(DOWNLOAD_DIR, name)
     if not os.path.exists(path):
         xbmcgui.Dialog().notification(
-            "My YouTubers", "File not found", xbmcgui.NOTIFICATION_ERROR
+            "Youtube On Kodi", "File not found", xbmcgui.NOTIFICATION_ERROR
         )
         return
     choice = xbmcgui.Dialog().select(name, ["Play", "Delete", "Cancel"])
@@ -398,8 +599,329 @@ def dl_file(name):
     elif choice == 1:
         if xbmcgui.Dialog().yesno("Delete", "Delete {}?".format(name)):
             os.remove(path)
-            xbmcgui.Dialog().notification("My YouTubers", "Deleted")
+            xbmcgui.Dialog().notification("Youtube On Kodi", "Deleted")
             xbmc.executebuiltin("Container.Refresh")
+
+
+def list_playlists():
+    plists = load_playlists()
+    li = xbmcgui.ListItem(label="[B]+ New playlist[/B]")
+    add_dir(li, build_url({"mode": "newplist"}))
+    for i, p in enumerate(plists):
+        n = len(p.get("videos", []))
+        label = p["name"]
+        if p.get("url"):
+            label += " (YouTube playlist)"
+        elif n:
+            label += " ({} videos)".format(n)
+        add_dir(dir_item(label), build_url({"mode": "myplist", "idx": str(i)}))
+    li = xbmcgui.ListItem(label="[B]YouTube playlists[/B]")
+    add_dir(li, build_url({"mode": "ytplists"}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def new_playlist():
+    kb = xbmc.Keyboard("", "Playlist name")
+    kb.doModal()
+    name = kb.getText().strip() if kb.isConfirmed() else ""
+    if not name:
+        return
+    plists = load_playlists()
+    plists.append({"name": name, "videos": []})
+    save_playlists(plists)
+    xbmc.executebuiltin("Container.Refresh")
+
+
+def list_my_playlist(idx, offset):
+    plists = load_playlists()
+    if idx < 0 or idx >= len(plists):
+        return
+    p = plists[idx]
+    xbmcplugin.setContent(HANDLE, "videos")
+    if p.get("url"):
+        li = xbmcgui.ListItem(label="[B]Rename[/B]")
+        add_dir(li, build_url({"mode": "plist_rename", "idx": str(idx)}))
+        li = xbmcgui.ListItem(label="[B]Delete playlist[/B]")
+        add_dir(li, build_url({"mode": "plist_del", "idx": str(idx)}))
+        end = offset + PAGE_SIZE
+        xbmc.executebuiltin("ActivateWindow(busydialog)")
+        try:
+            videos = kanyt.get_playlist_videos(p["url"], CACHE_DIR, end=end)
+        finally:
+            xbmc.executebuiltin("Dialog.Close(busydialog)")
+        for v in videos[offset:end]:
+            add_dir(
+                video_item(v),
+                build_url({"mode": "video", "id": v["id"], "title": v["title"]}),
+                isfolder=False,
+            )
+        if len(videos) >= end:
+            li = xbmcgui.ListItem(label="[B]Load more...[/B]")
+            add_dir(
+                li, build_url({"mode": "myplist", "idx": str(idx), "offset": str(end)})
+            )
+        xbmcplugin.endOfDirectory(HANDLE)
+        return
+    li = xbmcgui.ListItem(label="[B]+ Add video[/B]")
+    add_dir(li, build_url({"mode": "plist_add", "idx": str(idx)}))
+    li = xbmcgui.ListItem(label="[B]Rename[/B]")
+    add_dir(li, build_url({"mode": "plist_rename", "idx": str(idx)}))
+    li = xbmcgui.ListItem(label="[B]Delete playlist[/B]")
+    add_dir(li, build_url({"mode": "plist_del", "idx": str(idx)}))
+    for i, v in enumerate(p.get("videos", [])):
+        add_dir(
+            video_item(v),
+            build_url(
+                {
+                    "mode": "video",
+                    "id": v["id"],
+                    "title": v["title"],
+                    "idx": str(idx),
+                    "vpos": str(i),
+                }
+            ),
+            isfolder=False,
+        )
+    if not p.get("videos"):
+        li = xbmcgui.ListItem(label="Playlist is empty")
+        add_dir(li, build_url({"mode": "playlists"}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def plist_add_video(idx):
+    kb = xbmc.Keyboard("", "Paste a YouTube video URL or ID")
+    kb.doModal()
+    text = kb.getText().strip() if kb.isConfirmed() else ""
+    if not text:
+        return
+    m = re.search(r"(?:v=|v/|youtu\.be/|shorts/|^)([\w-]{11})(?:[?&]|$)", text)
+    video_id = m.group(1) if m else None
+    if not video_id:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "Could not find video ID", xbmcgui.NOTIFICATION_ERROR
+        )
+        return
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        info = kanyt.get_video_info(video_id)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    plists = load_playlists()
+    if idx < 0 or idx >= len(plists):
+        return
+    p = plists[idx]
+    if any(v["id"] == video_id for v in p.get("videos", [])):
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Already in playlist")
+        return
+    entry = {
+        "id": video_id,
+        "title": (info or {}).get("title") or video_id,
+        "thumb": (info or {}).get("thumb") or kanyt.THUMB.format(video_id),
+    }
+    p.setdefault("videos", []).append(entry)
+    save_playlists(plists)
+    xbmcgui.Dialog().notification("Youtube On Kodi", "Added")
+    xbmc.executebuiltin("Container.Refresh")
+
+
+def plist_rename(idx):
+    plists = load_playlists()
+    if idx < 0 or idx >= len(plists):
+        return
+    kb = xbmc.Keyboard(plists[idx]["name"], "Playlist name")
+    kb.doModal()
+    name = kb.getText().strip() if kb.isConfirmed() else ""
+    if not name:
+        return
+    plists[idx]["name"] = name
+    save_playlists(plists)
+    xbmc.executebuiltin("Container.Refresh")
+
+
+def plist_delete(idx):
+    plists = load_playlists()
+    if idx < 0 or idx >= len(plists):
+        return
+    if xbmcgui.Dialog().yesno("Delete", "Delete {}?".format(plists[idx]["name"])):
+        plists.pop(idx)
+        save_playlists(plists)
+        xbmc.executebuiltin("Container.Refresh")
+
+
+def list_yt_playlists():
+    channels = kanyt.read_channels_conf(CONF_FILE)
+    li = xbmcgui.ListItem(label="[B]Search playlists[/B]")
+    add_dir(li, build_url({"mode": "ytplistsrch"}))
+    li = xbmcgui.ListItem(label="[B]Open playlist by URL[/B]")
+    add_dir(li, build_url({"mode": "plist_url"}))
+    for c in channels:
+        label = "[B]Playlists: {}[/B]".format(c["name"] or c["query"])
+        add_dir(dir_item(label), build_url({"mode": "chplists", "q": c["query"]}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def do_playlist_search(query, offset):
+    if not query:
+        kb = xbmc.Keyboard("", "Search playlists")
+        kb.doModal()
+        if not kb.isConfirmed():
+            xbmc.executebuiltin("Container.Refresh")
+            return
+        query = kb.getText().strip()
+        if not query:
+            xbmc.executebuiltin("Container.Refresh")
+            return
+    end = offset + PAGE_SIZE
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        playlists = kanyt.search_playlists_cached(query, CACHE_DIR, end=end)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    if not playlists:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "No results", xbmcgui.NOTIFICATION_WARNING
+        )
+    for p in playlists:
+        add_dir(
+            dir_item(p["title"], p.get("thumb", "")),
+            build_url({"mode": "plist", "url": p["url"]}),
+        )
+    if len(playlists) >= end:
+        li = xbmcgui.ListItem(label="[B]Load more...[/B]")
+        add_dir(li, build_url({"mode": "ytplistresults", "q": query, "offset": str(end)}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def open_playlist_by_url():
+    kb = xbmc.Keyboard("", "Paste a YouTube playlist URL")
+    kb.doModal()
+    url = kb.getText().strip() if kb.isConfirmed() else ""
+    if not url:
+        return
+    if "list=" not in url:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "Not a playlist URL", xbmcgui.NOTIFICATION_ERROR
+        )
+        return
+    xbmc.executebuiltin("Container.Open(" + build_url({"mode": "plist", "url": url}) + ")")
+    xbmc.executebuiltin("ActivateWindow(Videos)")
+
+
+def list_channel_playlists(query):
+    ch = get_channel(query)
+    if not ch:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "Could not resolve channel: " + query, xbmcgui.NOTIFICATION_ERROR
+        )
+        return
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        playlists = kanyt.get_channel_playlists(ch["id"], CACHE_DIR)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    if not playlists:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "No playlists found", xbmcgui.NOTIFICATION_WARNING
+        )
+        return
+    for p in playlists:
+        li = xbmcgui.ListItem(label=p["title"])
+        add_dir(
+            li,
+            build_url({"mode": "chplistitem", "url": p["url"], "title": p["title"]}),
+        )
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def channel_playlist_menu(url, title):
+    choice = xbmcgui.Dialog().select(
+        title, ["Open", "Save to My Playlists", "Cancel"]
+    )
+    if choice == 0:
+        xbmc.executebuiltin(
+            "Container.Open(" + build_url({"mode": "plist", "url": url}) + ")"
+        )
+        xbmc.executebuiltin("ActivateWindow(Videos)")
+    elif choice == 1:
+        plists = load_playlists()
+        plists.append({"name": title, "url": url, "videos": []})
+        save_playlists(plists)
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Saved to My Playlists")
+
+
+def list_playlist_videos(url, offset, saved=False):
+    end = offset + PAGE_SIZE
+    xbmc.executebuiltin("ActivateWindow(busydialog)")
+    try:
+        videos = kanyt.get_playlist_videos(url, CACHE_DIR, end=end)
+    finally:
+        xbmc.executebuiltin("Dialog.Close(busydialog)")
+    xbmcplugin.setContent(HANDLE, "videos")
+    if saved:
+        plists = load_playlists()
+        exists = any(
+            p.get("url") == url for p in plists
+        )
+        if not exists:
+            li = xbmcgui.ListItem(label="[B]+ Save to My Playlists[/B]")
+            add_dir(li, build_url({"mode": "plistsave", "url": url}))
+    for v in videos[offset:end]:
+        add_dir(
+            video_item(v),
+            build_url({"mode": "video", "id": v["id"], "title": v["title"]}),
+            isfolder=False,
+        )
+    if not videos:
+        xbmcgui.Dialog().notification(
+            "Youtube On Kodi", "No videos", xbmcgui.NOTIFICATION_WARNING
+        )
+    if len(videos) >= end:
+        li = xbmcgui.ListItem(label="[B]Load more...[/B]")
+        add_dir(li, build_url({"mode": "plist", "url": url, "offset": str(end)}))
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def save_playlist_by_url(url):
+    plists = load_playlists()
+    if any(p.get("url") == url for p in plists):
+        xbmcgui.Dialog().notification("Youtube On Kodi", "Already saved")
+        return
+    kb = xbmc.Keyboard("", "Playlist name")
+    kb.doModal()
+    name = kb.getText().strip() if kb.isConfirmed() else ""
+    if not name:
+        return
+    plists.append({"name": name, "url": url, "videos": []})
+    save_playlists(plists)
+    xbmcgui.Dialog().notification("Youtube On Kodi", "Saved to My Playlists")
+
+
+def list_history():
+    hist = load_history()
+    items = sorted(hist.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)
+    li = xbmcgui.ListItem(label="[B]Clear history[/B]")
+    add_dir(li, build_url({"mode": "hist_clear"}))
+    if not items:
+        li = xbmcgui.ListItem(label="No history yet")
+        add_dir(li, build_url({"mode": "main"}))
+        xbmcplugin.endOfDirectory(HANDLE)
+        return
+    for vid, h in items:
+        pos = fmt_time(h.get("position", 0))
+        dur = fmt_time(h.get("duration", 0))
+        label = "{} ({}/{})".format(h.get("title", vid), pos, dur)
+        add_dir(
+            dir_item(label),
+            build_url({"mode": "play", "id": vid, "title": h.get("title", ""), "resume": "1"}),
+            isfolder=False,
+        )
+    xbmcplugin.endOfDirectory(HANDLE)
+
+
+def clear_history():
+    if xbmcgui.Dialog().yesno("History", "Clear watch history?"):
+        save_history({})
+        xbmc.executebuiltin("Container.Refresh")
 
 
 def router(paramstring):
@@ -420,13 +942,58 @@ def router(paramstring):
     elif mode == "popular":
         do_popular()
     elif mode == "video":
-        video_menu(params.get("id", ""))
+        video_menu(
+            params.get("id", ""),
+            params.get("title", ""),
+            int(params.get("idx", "-1")),
+            int(params.get("vpos", "-1")),
+        )
     elif mode == "play":
-        play_video(params.get("id", ""))
+        play_video(
+            params.get("id", ""),
+            params.get("title", ""),
+            auto_resume=params.get("resume") == "1",
+        )
     elif mode == "downloads":
         list_downloads()
     elif mode == "dlfile":
         dl_file(params.get("file", ""))
+    elif mode == "playlists":
+        list_playlists()
+    elif mode == "newplist":
+        new_playlist()
+    elif mode == "myplist":
+        list_my_playlist(int(params.get("idx", "-1")), int(params.get("offset", "0")))
+    elif mode == "plist_add":
+        plist_add_video(int(params.get("idx", "-1")))
+    elif mode == "plist_rename":
+        plist_rename(int(params.get("idx", "-1")))
+    elif mode == "plist_del":
+        plist_delete(int(params.get("idx", "-1")))
+    elif mode == "ytplists":
+        list_yt_playlists()
+    elif mode == "ytplistsrch":
+        do_playlist_search("", 0)
+    elif mode == "ytplistresults":
+        do_playlist_search(params.get("q", ""), int(params.get("offset", "0")))
+    elif mode == "plist_url":
+        open_playlist_by_url()
+    elif mode == "chplists":
+        list_channel_playlists(params.get("q", ""))
+    elif mode == "chplistitem":
+        channel_playlist_menu(params.get("url", ""), params.get("title", "Playlist"))
+    elif mode == "plist":
+        list_playlist_videos(
+            params.get("url", ""),
+            int(params.get("offset", "0")),
+            saved=True,
+        )
+    elif mode == "plistsave":
+        save_playlist_by_url(params.get("url", ""))
+    elif mode == "history":
+        list_history()
+    elif mode == "hist_clear":
+        clear_history()
     else:
         list_channels()
 
@@ -439,7 +1006,7 @@ def log_error(e):
         pass
     try:
         xbmcgui.Dialog().notification(
-            "My YouTubers", "Error: " + str(e), xbmcgui.NOTIFICATION_ERROR
+            "Youtube On Kodi", "Error: " + str(e), xbmcgui.NOTIFICATION_ERROR
         )
     except Exception:
         pass

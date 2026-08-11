@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<addon id="plugin.video.myyoutubers" name="My YouTubers" version="1.3.0" provider-name="local">
+<addon id="plugin.video.myyoutubers" name="Youtube On Kodi" version="1.4.0" provider-name="local">
     <requires>
         <import addon="xbmc.python" version="3.0.0"/>
     </requires>
@@ -8,13 +8,14 @@
     </extension>
     <extension point="xbmc.addon.metadata">
         <summary lang="en">Browse and stream YouTube channels. No login, no API.</summary>
-        <description lang="en">A custom, unofficial YouTube browser for Kodi. Browse channels defined in channels.conf, search YouTube or within a channel, and stream or download videos in up to 720p using yt-dlp. Downloads are managed from the addon with a built-in list and delete option. No YouTube login or API key required. Not affiliated with or endorsed by Google LLC or YouTube, LLC.</description>
+        <description lang="en">A custom, unofficial YouTube browser for Kodi. Browse channels defined in channels.conf, search YouTube or within a channel, and stream or download videos in up to 720p using yt-dlp. Playlists are supported from your channels, from search results, and your own playlists created in the addon. Watch history tracks your progress and offers resume. Downloads are managed from the addon with a built-in list and delete option. No YouTube login or API key required. Not affiliated with or endorsed by Google LLC or YouTube, LLC.</description>
         <platform>all</platform>
         <license>GPL-2.0-or-later</license>
         <assets>
             <icon>resources/icon.png</icon>
         </assets>
         <news>
+1.4.0 - Playlists: browse your channels' playlists, playlist results in search, playlists you create in the addon (add or paste video links), and watch history with resume
 1.3.0 - Added a Popular section (top videos from your channels by views) and Load more for YouTube search
 1.2.1 - Load more now works without a JS runtime (yt-dlp binary must be provided)
 1.2.0 - Added video download with progress and a Downloads manager (play/delete)
