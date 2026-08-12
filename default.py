@@ -10,17 +10,11 @@ import time
 import traceback
 import urllib.parse
 
-sys.path.insert(
-    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "lib")
-)
-
 import xbmc
 import xbmcaddon
 import xbmcgui
 import xbmcplugin
 import xbmcvfs
-
-import kanyt
 
 ADDON = xbmcaddon.Addon()
 ADDON_PATH = xbmcvfs.translatePath(ADDON.getAddonInfo("path"))
@@ -32,8 +26,24 @@ DOWNLOAD_DIR = os.path.join(PROFILE, "downloads")
 PLAYLISTS_FILE = os.path.join(PROFILE, "playlists.json")
 HISTORY_FILE = os.path.join(PROFILE, "history.json")
 DEFAULT_CONF = os.path.join(ADDON_PATH, "resources", "channels.conf")
+CLEANUP_FILE = os.path.join(PROFILE, "cleanup.json")
 
-REFRESH_INTERVAL = 86400  # 24 hours in seconds
+sys.path.insert(0, os.path.join(ADDON_PATH, "resources", "lib"))
+
+import kanyt
+
+
+def get_setting_int(name, default):
+    try:
+        return int(ADDON.getSetting(name) or default)
+    except (ValueError, TypeError):
+        return default
+
+
+kanyt.REFRESH_INTERVAL = get_setting_int("refresh_hours", 24) * 3600
+kanyt.CHANNEL_EXPIRE = get_setting_int("channel_expire_days", 30) * 86400
+kanyt.RETRY_COOLDOWN = get_setting_int("retry_cooldown_minutes", 10) * 60
+kanyt.SEARCH_MAX_AGE = get_setting_int("search_max_age_days", 7) * 86400
 
 os.makedirs(PROFILE, exist_ok=True)
 if not os.path.exists(CONF_FILE):
@@ -59,7 +69,8 @@ def video_item(v):
     label = v["title"]
     if entry:
         pos = entry.get("position", 0)
-        if pos > 30:  # only show if meaningful progress
+        dur = entry.get("duration", 0)
+        if pos > 30 and dur and pos < dur - 30:  # only show if meaningful progress
             label += " [resume {}]".format(fmt_time(pos))
     li = xbmcgui.ListItem(label=label)
     li.setInfo(
@@ -96,8 +107,7 @@ def load_playlists():
 
 
 def save_playlists(plists):
-    with open(PLAYLISTS_FILE, "w") as f:
-        json.dump(plists, f)
+    kanyt.atomic_write(PLAYLISTS_FILE, plists)
 
 
 def load_history():
@@ -114,8 +124,7 @@ def load_history():
 
 
 def save_history(hist):
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(hist, f)
+    kanyt.atomic_write(HISTORY_FILE, hist)
 
 
 def fmt_time(sec):
@@ -128,14 +137,16 @@ def fmt_time(sec):
 
 
 def write_conf(channels):
-    with open(CONF_FILE, "w") as f:
-        f.write("# One channel per line. Values: handle (@name), URL, ID, or plain name.\n")
-        f.write("# Optional display name after '|'.\n")
-        for c in channels:
-            line = c["query"]
-            if c.get("name"):
-                line += " | " + c["name"]
-            f.write(line + "\n")
+    lines = [
+        "# One channel per line. Values: handle (@name), URL, ID, or plain name.\n",
+        "# Optional display name after '|'.\n",
+    ]
+    for c in channels:
+        line = c["query"]
+        if c.get("name"):
+            line += " | " + c["name"]
+        lines.append(line + "\n")
+    kanyt.atomic_write_text(CONF_FILE, "".join(lines))
 
 
 def get_channel(query):
@@ -150,6 +161,87 @@ def get_channel(query):
     if name:
         ch["name"] = name
     return ch
+
+
+# --- Cache cleanup ---
+
+def cache_cleanup_due():
+    try:
+        with open(CLEANUP_FILE) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return time.time() - data.get("last", 0) >= 86400
+    except (OSError, ValueError):
+        pass
+    return True
+
+
+def save_cleanup_stamp():
+    kanyt.atomic_write(CLEANUP_FILE, {"last": time.time()})
+
+
+def run_cache_cleanup(force=False):
+    if not force and not cache_cleanup_due():
+        return
+    try:
+        if not os.path.isdir(CACHE_DIR):
+            return
+        channels = kanyt.read_channels_conf(CONF_FILE)
+        queries = [c["query"] for c in channels]
+        ch_file = os.path.join(CACHE_DIR, "channels.json")
+        chmap = {}
+        if os.path.exists(ch_file):
+            try:
+                with open(ch_file) as f:
+                    chmap = json.load(f)
+            except (OSError, ValueError):
+                chmap = {}
+        valid_ids = set()
+        for q in queries:
+            entry = chmap.get(q)
+            if isinstance(entry, dict) and entry.get("id"):
+                valid_ids.add(entry["id"])
+        newmap = {q: v for q, v in chmap.items() if q in queries}
+        if newmap != chmap:
+            kanyt.atomic_write(ch_file, newmap)
+
+        max_age = kanyt.SEARCH_MAX_AGE
+        max_files = get_setting_int("search_max_files", 50)
+        now = time.time()
+        doomed = []
+        for f in os.listdir(CACHE_DIR):
+            path = os.path.join(CACHE_DIR, f)
+            if not os.path.isfile(path):
+                continue
+            if f.endswith(".json") and f.startswith(("UC", "plists_UC")):
+                raw = f[len("plists_"):] if f.startswith("plists_") else f
+                cid = raw[:-5]
+                if cid not in valid_ids:
+                    doomed.append(path)
+            elif f.startswith(("search_", "psrch_", "popular_")):
+                if now - os.path.getmtime(path) > max_age:
+                    doomed.append(path)
+        if max_files and max_files > 0:
+            search_files = sorted(
+                (
+                    os.path.join(CACHE_DIR, name)
+                    for name in os.listdir(CACHE_DIR)
+                    if name.startswith(("search_", "psrch_"))
+                    and os.path.isfile(os.path.join(CACHE_DIR, name))
+                ),
+                key=os.path.getmtime,
+            )
+            keep = set(search_files[-max_files:])
+            for path in search_files:
+                if path not in keep and path not in doomed:
+                    doomed.append(path)
+        for path in doomed:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    finally:
+        save_cleanup_stamp()
 
 
 # --- Refresh functions ---
@@ -389,7 +481,7 @@ def do_popular():
             resolved.append((ch["id"], ch["name"] or c["query"]))
     xbmc.executebuiltin("ActivateWindow(busydialog)")
     try:
-        videos = kanyt.popular_videos(resolved, limit=30)
+        videos = kanyt.popular_videos(resolved, limit=30, cache_dir=CACHE_DIR)
     finally:
         xbmc.executebuiltin("Dialog.Close(busydialog)")
     xbmcplugin.setContent(HANDLE, "videos")
@@ -415,7 +507,7 @@ def play_video(video_id, title="", auto_resume=False):
     if entry:
         pos = entry.get("position") or 0
         dur = entry.get("duration") or 0
-        if pos > 30 and dur and pos < dur - 10:
+        if pos > 30 and dur and pos < dur - 30:
             if auto_resume:
                 resume_at = pos
             elif xbmcgui.Dialog().yesno(
@@ -780,7 +872,7 @@ def plist_add_video(idx):
         return
     xbmc.executebuiltin("ActivateWindow(busydialog)")
     try:
-        info = kanyt.get_video_info(video_id)
+        info = kanyt.get_video_info(video_id, cache_dir=CACHE_DIR)
     finally:
         xbmc.executebuiltin("Dialog.Close(busydialog)")
     plists = load_playlists()
@@ -1127,6 +1219,10 @@ def log_error(e):
 
 
 if __name__ == "__main__":
+    try:
+        run_cache_cleanup()
+    except Exception:
+        pass
     try:
         router(sys.argv[2])
     except Exception as e:

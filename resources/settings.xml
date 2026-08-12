@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<settings>
+    <setting id="refresh_hours" type="slider" label="Cache duration (hours)" range="1,168" option="int" default="24" />
+    <setting id="channel_expire_days" type="slider" label="Channel cache expiry (days)" range="1,365" option="int" default="30" />
+    <setting id="retry_cooldown_minutes" type="slider" label="Retry cooldown after failure (minutes)" range="1,120" option="int" default="10" />
+    <setting id="search_max_age_days" type="slider" label="Search cache max age (days)" range="1,90" option="int" default="7" />
+    <setting id="search_max_files" type="slider" label="Max search cache files (0 = unlimited)" range="0,500" option="int" default="50" />
+</settings>

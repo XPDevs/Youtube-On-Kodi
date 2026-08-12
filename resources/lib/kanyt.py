@@ -19,7 +19,51 @@ RESULTS_URL = "https://www.youtube.com/results?search_query={}"
 THUMB = "https://i.ytimg.com/vi/{}/hqdefault.jpg"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
-REFRESH_INTERVAL = 86400  # 24 hours in seconds
+REFRESH_INTERVAL = 86400  # seconds; overridden by addon setting (hours)
+CHANNEL_EXPIRE = 30 * 86400  # channels.json entries expire after 30 days
+RETRY_COOLDOWN = 10 * 60  # cooldown before retrying a failed yt-dlp request
+SEARCH_MAX_AGE = 7 * 86400  # search cache files older than this are deleted
+POPULAR_TTL = 3600  # popular_videos cache lifetime (1 hour)
+VIDEOINFO_TTL = 30 * 86400  # get_video_info metadata cache lifetime
+
+
+def atomic_write(path, data, indent=2):
+    """Atomically write JSON to path using a temp file + rename."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_text(path, text):
+    """Atomically write plain text to path using a temp file + rename."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
 
 FFMPEG_DIRS = [
     "/storage/.kodi/addons/tools.ffmpeg-tools/bin",
@@ -28,18 +72,35 @@ FFMPEG_DIRS = [
 
 
 def _is_cache_expired(filepath):
-    """Return True if the cache file is older than REFRESH_INTERVAL or doesn't contain a timestamp."""
+    """Return True if the cache file is older than REFRESH_INTERVAL or lacks a timestamp."""
     if not os.path.exists(filepath):
         return True
     try:
         with open(filepath) as f:
             data = json.load(f)
-        timestamp = data.get("timestamp", 0)
-        if time.time() - timestamp > REFRESH_INTERVAL:
+        if not isinstance(data, dict):
             return True
-        return False
+        retry_after = data.get("retry_after", 0)
+        if retry_after and retry_after > time.time():
+            return False
+        timestamp = data.get("timestamp", 0)
+        return time.time() - timestamp > REFRESH_INTERVAL
     except (OSError, ValueError):
         return True
+
+
+def _in_cooldown(filepath):
+    """Return True if a previous failed fetch is still inside its retry cooldown."""
+    if not os.path.exists(filepath):
+        return False
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data.get("retry_after", 0) > time.time()
+    except (OSError, ValueError):
+        pass
+    return False
 
 
 def find_ffmpeg_dir():
@@ -305,6 +366,13 @@ def resolve_channel(query):
     return None
 
 
+def _entry_expired(entry):
+    if not isinstance(entry, dict):
+        return True
+    ts = entry.get("timestamp", 0)
+    return not ts or time.time() - ts > CHANNEL_EXPIRE
+
+
 def resolve_cached(query, cache_dir):
     cache_file = os.path.join(cache_dir, "channels.json")
     data = {}
@@ -314,35 +382,44 @@ def resolve_cached(query, cache_dir):
                 data = json.load(f)
         except (OSError, ValueError):
             data = {}
-    if query not in data:
-        ch = resolve_channel(query)
-        if ch:
-            data[query] = ch
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump(data, f, indent=2)
-        else:
-            return None
-    return data[query]
+    entry = data.get(query)
+    if entry and not _entry_expired(entry):
+        return entry
+    ch = resolve_channel(query)
+    if ch:
+        ch["timestamp"] = time.time()
+        data[query] = ch
+        atomic_write(cache_file, data)
+        return ch
+    if entry:
+        return entry
+    return None
 
 
 def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
     cache_file = os.path.join(cache_dir, channel_id + ".json")
     videos = []
     cached_end = 0
+    cached_data = None
 
-    # Check if cache exists and is fresh
-    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
+    # Check if cache exists
+    if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
-                data = json.load(f)
-            videos = data.get("videos", [])
-            cached_end = data.get("end", len(videos))
+                cached_data = json.load(f)
+            if isinstance(cached_data, dict):
+                videos = cached_data.get("videos", [])
+                cached_end = cached_data.get("end", len(videos))
         except (OSError, ValueError):
-            videos, cached_end = [], 0
+            cached_data = None
 
     # If cache missing or expired, fetch new data
     if cached_end < end or _is_cache_expired(cache_file):
+        # Don't hammer a failing request; respect the retry cooldown.
+        if _in_cooldown(cache_file):
+            return videos[:end]
+
+        refreshed = False
         p = _run_ytdlp(
             [
                 "--flat-playlist",
@@ -357,79 +434,94 @@ def get_channel_videos(channel_id, cache_dir, end=60, timeout=180):
         if p.returncode == 0:
             try:
                 data = json.loads(p.stdout)
-                videos = [_entry_to_video(e) for e in data.get("entries", [])]
-                videos = [v for v in videos if v]
-                cached_end = end
+                new_videos = [_entry_to_video(e) for e in data.get("entries", [])]
+                new_videos = [v for v in new_videos if v]
+                if new_videos:
+                    videos = new_videos
+                    cached_end = end
+                    refreshed = True
             except ValueError:
                 pass
-        if not videos:
+        if not refreshed:
             try:
-                videos = get_latest_videos(channel_id, limit=15)
-                cached_end = len(videos)
+                new_videos = get_latest_videos(channel_id, limit=15)
+                if new_videos:
+                    videos = new_videos
+                    cached_end = len(new_videos)
+                    refreshed = True
             except Exception:
-                videos, cached_end = [], 0
-        if videos:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "videos": videos, "timestamp": time.time()}, f)
+                pass
+        out = {"end": cached_end, "videos": videos}
+        if refreshed:
+            out["timestamp"] = time.time()
+            out["retry_after"] = 0
         else:
-            # If fetch fails, we might want to keep old cache? For now, we'll keep existing if any.
-            if os.path.exists(cache_file):
-                try:
-                    with open(cache_file) as f:
-                        old_data = json.load(f)
-                    videos = old_data.get("videos", [])
-                except:
-                    videos = []
+            # Fetch failed: keep old cache (if any) and set a retry cooldown.
+            out["timestamp"] = (
+                cached_data.get("timestamp", 0) if isinstance(cached_data, dict) else 0
+            )
+            out["retry_after"] = time.time() + RETRY_COOLDOWN
+        atomic_write(cache_file, out)
     return videos[:end]
 
 
 def get_channel_playlists(channel_id, cache_dir, timeout=90):
     cache_file = os.path.join(cache_dir, "plists_" + channel_id + ".json")
     playlists = []
-    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
+    cached_data = None
+    if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
-                playlists = json.load(f)
-            if playlists:
-                return playlists
+                cached_data = json.load(f)
+            if isinstance(cached_data, dict):
+                playlists = cached_data.get("playlists", [])
+            elif isinstance(cached_data, list):
+                playlists = cached_data
         except (OSError, ValueError):
-            playlists = []
+            cached_data = None
+    if playlists and not _is_cache_expired(cache_file):
+        return playlists
+    # Don't hammer a failing request; respect the retry cooldown.
+    if _in_cooldown(cache_file):
+        return playlists
+
     # Fetch fresh
     url = "https://www.youtube.com/channel/{}/playlists".format(channel_id)
     p = _run_ytdlp(
         ["--flat-playlist", "-J", "--no-warnings", url],
         timeout=timeout,
     )
+    refreshed = False
     if p.returncode == 0:
         try:
             data = json.loads(p.stdout)
+            new_playlists = []
             for e in data.get("entries", []):
                 if not e or not e.get("id"):
                     continue
-                playlists.append(
+                new_playlists.append(
                     {
                         "id": e["id"],
                         "title": (e.get("title") or "").strip(),
                         "url": "https://www.youtube.com/playlist?list=" + e["id"],
                     }
                 )
+            if new_playlists:
+                playlists = new_playlists
+                refreshed = True
         except ValueError:
-            playlists = []
-    if playlists:
-        os.makedirs(cache_dir, exist_ok=True)
-        with open(cache_file, "w") as f:
-            json.dump(playlists, f, indent=2)  # also could add timestamp, but not needed for playlists? We'll add.
-            # Actually we should add timestamp to the file structure.
-            # For simplicity, we'll save as dict with 'playlists' and 'timestamp'.
-            # But to avoid breaking existing code, we'll wrap.
-        # Better: save as dict
-        with open(cache_file, "w") as f:
-            json.dump({"playlists": playlists, "timestamp": time.time()}, f)
+            pass
+    out = {"playlists": playlists}
+    if refreshed:
+        out["timestamp"] = time.time()
+        out["retry_after"] = 0
     else:
-        # If fetch fails and we had old data, return that? We already checked expiry, so we might have no data.
-        # We'll return empty.
-        pass
+        # Fetch failed: keep old cached data (if any) and set a retry cooldown.
+        out["timestamp"] = (
+            cached_data.get("timestamp", 0) if isinstance(cached_data, dict) else 0
+        )
+        out["retry_after"] = time.time() + RETRY_COOLDOWN
+    atomic_write(cache_file, out)
     return playlists
 
 
@@ -439,15 +531,17 @@ def get_playlist_videos(playlist_url, cache_dir, end=30, timeout=90):
         "plist_" + hashlib.sha1(playlist_url.encode("utf-8", "ignore")).hexdigest() + ".json",
     )
     videos, cached_end = [], 0
-    if os.path.exists(cache_file) and not _is_cache_expired(cache_file):
+    cached_data = None
+    if os.path.exists(cache_file):
         try:
             with open(cache_file) as f:
-                data = json.load(f)
-            videos = data.get("videos", [])
-            cached_end = data.get("end", len(videos))
+                cached_data = json.load(f)
+            if isinstance(cached_data, dict):
+                videos = cached_data.get("videos", [])
+                cached_end = cached_data.get("end", len(videos))
         except (OSError, ValueError):
-            videos, cached_end = [], 0
-    if cached_end < end:
+            cached_data = None
+    if cached_end < end and not _in_cooldown(cache_file):
         p = _run_ytdlp(
             [
                 "--flat-playlist",
@@ -459,18 +553,29 @@ def get_playlist_videos(playlist_url, cache_dir, end=30, timeout=90):
             ],
             timeout=timeout,
         )
+        refreshed = False
         if p.returncode == 0:
             try:
                 data = json.loads(p.stdout)
-                videos = [_entry_to_video(e) for e in data.get("entries", [])]
-                videos = [v for v in videos if v]
-                cached_end = end
+                new_videos = [_entry_to_video(e) for e in data.get("entries", [])]
+                new_videos = [v for v in new_videos if v]
+                if new_videos:
+                    videos = new_videos
+                    cached_end = end
+                    refreshed = True
             except ValueError:
                 pass
-        if videos:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "videos": videos, "timestamp": time.time()}, f)
+        out = {"end": cached_end, "videos": videos}
+        if refreshed:
+            out["timestamp"] = time.time()
+            out["retry_after"] = 0
+        else:
+            # Fetch failed: keep old cached data (if any) and set a retry cooldown.
+            out["timestamp"] = (
+                cached_data.get("timestamp", 0) if isinstance(cached_data, dict) else 0
+            )
+            out["retry_after"] = time.time() + RETRY_COOLDOWN
+        atomic_write(cache_file, out)
     return videos[:end]
 
 
@@ -579,9 +684,10 @@ def search_cached(query, cache_dir, end, timeout=90):
                 entries = []
         cached_end = len(entries)
         if entries:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "entries": entries, "timestamp": time.time()}, f)
+            atomic_write(
+                cache_file,
+                {"end": cached_end, "entries": entries, "timestamp": time.time()},
+            )
     return entries[:end]
 
 
@@ -628,13 +734,31 @@ def search_playlists_cached(query, cache_dir, end, timeout=90):
                 playlists = []
         cached_end = len(playlists)
         if playlists:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump({"end": cached_end, "playlists": playlists, "timestamp": time.time()}, f)
+            atomic_write(
+                cache_file,
+                {"end": cached_end, "playlists": playlists, "timestamp": time.time()},
+            )
     return playlists[:end]
 
 
-def popular_videos(channels, limit=30):
+def popular_videos(channels, limit=30, cache_dir=None):
+    key = hashlib.sha1(
+        json.dumps(sorted((cid, name) for cid, name in channels if name)).encode(
+            "utf-8", "ignore"
+        )
+    ).hexdigest()
+    cache_file = os.path.join(cache_dir, "popular_" + key + ".json") if cache_dir else None
+    if cache_file and os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                data = json.load(f)
+            if (
+                data.get("limit", 0) >= limit
+                and time.time() - data.get("timestamp", 0) <= POPULAR_TTL
+            ):
+                return data.get("videos", [])[:limit]
+        except (OSError, ValueError):
+            pass
     out = {}
     for cid, name in channels:
         if not name:
@@ -649,7 +773,10 @@ def popular_videos(channels, limit=30):
             if v.get("channel_id") == cid and v.get("view_count") is not None:
                 out.setdefault(v["id"], v)
     popular = sorted(out.values(), key=lambda v: v.get("view_count") or 0, reverse=True)
-    return popular[:limit]
+    popular = popular[:limit]
+    if cache_file:
+        atomic_write(cache_file, {"videos": popular, "limit": limit, "timestamp": time.time()})
+    return popular
 
 
 def search_channel(channel_id, query, count=30):
@@ -660,7 +787,22 @@ def search_channel(channel_id, query, count=30):
     ]
 
 
-def get_video_info(video_id):
+def get_video_info(video_id, cache_dir=None):
+    cache_file = None
+    if cache_dir:
+        cache_file = os.path.join(cache_dir, "vinfo_" + video_id + ".json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file) as f:
+                    data = json.load(f)
+                if (
+                    isinstance(data, dict)
+                    and data.get("info")
+                    and time.time() - data.get("timestamp", 0) <= VIDEOINFO_TTL
+                ):
+                    return data.get("info")
+            except (OSError, ValueError):
+                pass
     url = WATCH_URL.format(video_id)
     p = _run_ytdlp(["-J", "--no-warnings", url], timeout=60)
     if p.returncode == 0:
@@ -669,12 +811,15 @@ def get_video_info(video_id):
         except ValueError:
             return None
         vid = d.get("id") or video_id
-        return {
+        info = {
             "id": vid,
             "title": (d.get("title") or video_id).strip(),
             "thumb": THUMB.format(vid),
             "channel": d.get("channel"),
         }
+        if cache_file:
+            atomic_write(cache_file, {"info": info, "timestamp": time.time()})
+        return info
     return None
 
 
